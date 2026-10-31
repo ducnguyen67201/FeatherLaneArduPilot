@@ -27,6 +27,10 @@
 
 #include <AP_HAL/AP_HAL.h>
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+#include <FL_Status/FL_Status.h>
+#endif
+
 // Common dependencies
 #include <AP_Common/AP_Common.h>            // Common definitions and utility routines for the ArduPilot libraries
 #include <AP_Common/Location.h>             // Library having the implementation of location class         
@@ -584,6 +588,10 @@ private:
     bool standby_active;
 
     static const AP_Scheduler::Task scheduler_tasks[];
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+    FL_Status featherlane_status;
+    void update_featherlane_status();
+#endif
     static const AP_Param::Info var_info[];
     static const struct LogStructure log_structure[];
 

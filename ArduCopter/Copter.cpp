@@ -258,6 +258,9 @@ const AP_Scheduler::Task Copter::scheduler_tasks[] = {
 #if HAL_BUTTON_ENABLED
     SCHED_TASK_CLASS(AP_Button,            &copter.button,              update,           5, 100, 168),
 #endif
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+    SCHED_TASK(update_featherlane_status,  1,    100, 171),
+#endif
 #if AP_INERTIALSENSOR_FAST_SAMPLE_WINDOW_ENABLED
     // don't delete this, there is an equivalent (virtual) in AP_Vehicle for the non-rate loop case
     SCHED_TASK(update_dynamic_notch_at_specified_rate_main,                       LOOP_RATE, 200, 215),
@@ -942,6 +945,17 @@ bool Copter::get_rate_ef_targets(Vector3f& rate_ef_targets_rads) const
     }
     return true;
 }
+
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+void Copter::update_featherlane_status()
+{
+    if (featherlane_status.update(uint8_t(flightmode->mode_number()), motors->armed())) {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "FL L08 tick=%lu mode=%u armed=%u",
+                      (unsigned long)featherlane_status.update_count(),
+                      unsigned(featherlane_status.mode()), unsigned(featherlane_status.armed()));
+    }
+}
+#endif // CONFIG_HAL_BOARD == HAL_BOARD_SITL
 
 /*
   constructor for main Copter class
