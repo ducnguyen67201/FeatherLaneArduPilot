@@ -35,6 +35,9 @@ protected:
 #endif
     MAV_RESULT handle_command_int_packet(const mavlink_command_int_t &packet, const mavlink_message_t &msg) override;
     MAV_RESULT handle_command_int_do_reposition(const mavlink_command_int_t &packet);
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+    MAV_RESULT handle_featherlane_admission(const mavlink_command_int_t &packet, const mavlink_message_t &msg);
+#endif
     MAV_RESULT handle_command_pause_continue(const mavlink_command_int_t &packet);
 
     void handle_message_set_attitude_target(const mavlink_message_t &msg);

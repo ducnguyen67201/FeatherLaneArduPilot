@@ -2,12 +2,17 @@
 
 def build(bld):
     vehicle = bld.path.name
+    sitl_libraries = []
+    if bld.env.BOARD == 'sitl':
+        sitl_libraries = [
+            'FL_Status',
+            'FL_TaskAdmission',
+        ]
+
     bld.ap_stlib(
         name=vehicle + '_libs',
         ap_vehicle=vehicle,
-        ap_libraries=bld.ap_common_vehicle_libraries() + (
-            ['FL_Status'] if bld.env.BOARD == 'sitl' else []
-        ) + [
+        ap_libraries=bld.ap_common_vehicle_libraries() + sitl_libraries + [
             'AC_AttitudeControl',
             'AC_InputManager',
             'AC_PrecLand',

@@ -29,6 +29,7 @@
 
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
 #include <FL_Status/FL_Status.h>
+#include <FL_TaskAdmission/FL_TaskAdmission.h>
 #endif
 
 // Common dependencies
@@ -590,6 +591,7 @@ private:
     static const AP_Scheduler::Task scheduler_tasks[];
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
     FL_Status featherlane_status;
+    FL_TaskAdmission featherlane_task;
     void update_featherlane_status();
 #endif
     static const AP_Param::Info var_info[];

@@ -498,9 +498,73 @@ MAV_RESULT GCS_MAVLINK_Copter::handle_command_int_do_reposition(const mavlink_co
 #endif
 }
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+MAV_RESULT GCS_MAVLINK_Copter::handle_featherlane_admission(const mavlink_command_int_t &packet,
+                                                        const mavlink_message_t &msg)
+{
+    if (msg.msgid != MAVLINK_MSG_ID_COMMAND_INT) {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "FL L09 command_int_only kept=%u",
+                      unsigned(copter.featherlane_task.retained_id()));
+        return MAV_RESULT_COMMAND_INT_ONLY;
+    }
+
+    FL_TaskAdmission::Request request {};
+    request.version = packet.param1;
+    request.task_id = packet.param2;
+    request.speed_mps = packet.param3;
+    request.radius_m = packet.param4;
+    request.latitude_e7 = packet.x;
+    request.longitude_e7 = packet.y;
+    request.height_m = packet.z;
+    request.frame = packet.frame;
+    request.current = packet.current;
+    request.autocontinue = packet.autocontinue;
+
+    FL_TaskAdmission::Context context {};
+    context.source_allowed = gcs().sysid_is_gcs(msg.sysid);
+    context.vehicle_allowed = !copter.motors->armed() && copter.ap.land_complete &&
+                              copter.flightmode->mode_number() == Mode::Number::STABILIZE;
+    context.home_valid = copter.ahrs.home_is_set();
+    context.navigation_valid = copter.ekf_has_absolute_position() && !copter.failsafe.ekf;
+    context.home = copter.ahrs.get_home();
+
+    const auto result = copter.featherlane_task.admit(request, context);
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "FL L09 %s kept=%u", FL_TaskAdmission::reason(result),
+                  unsigned(copter.featherlane_task.retained_id()));
+
+    using Result = FL_TaskAdmission::Result;
+
+    switch (result) {
+        case Result::ACCEPTED:
+
+        case Result::DUPLICATE:
+            return MAV_RESULT_ACCEPTED;
+
+        case Result::VERSION:
+        case Result::FRAME:
+        case Result::FLAGS:
+            return MAV_RESULT_UNSUPPORTED;
+
+        case Result::VEHICLE:
+        case Result::HOME:
+        case Result::NAVIGATION:
+        case Result::BUSY:
+            return MAV_RESULT_TEMPORARILY_REJECTED;
+
+        default:
+            return MAV_RESULT_DENIED;
+    }
+}
+#endif // CONFIG_HAL_BOARD == HAL_BOARD_SITL
+
 MAV_RESULT GCS_MAVLINK_Copter::handle_command_int_packet(const mavlink_command_int_t &packet, const mavlink_message_t &msg)
 {
     switch(packet.command) {
+
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+    case MAV_CMD_USER_1:
+        return handle_featherlane_admission(packet, msg);
+#endif
 
     case MAV_CMD_CONDITION_YAW:
         return handle_MAV_CMD_CONDITION_YAW(packet);
