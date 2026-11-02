@@ -8,6 +8,43 @@ static constexpr float MAX_ENTRY_SPEED_MPS = 0.3f;
 static constexpr float MAX_ENTRY_HEIGHT_ERROR_M = 0.5f;
 static constexpr float MAX_EXECUTION_DISTANCE_M = 20.0f;
 static constexpr float CM_TO_METRES = 0.01f;
+static constexpr float MAX_ARRIVAL_SPEED_MPS = 0.3f;
+static constexpr float MAX_ARRIVAL_HEIGHT_ERROR_M = 0.2f;
+static constexpr float MAX_ARRIVAL_VERTICAL_SPEED_MPS = 0.2f;
+static constexpr uint32_t ARRIVAL_DWELL_MS = 2000;
+static constexpr uint32_t MAX_ARRIVAL_UPDATE_GAP_MS = 250;
+
+const char *ModeFeatherLane::task_state_name() const
+{
+    switch (_task_state) {
+    case TaskState::IDLE:
+        return "idle";
+    case TaskState::RUNNING:
+        return "running";
+    case TaskState::DWELLING:
+        return "dwelling";
+    case TaskState::COMPLETE:
+        return "complete";
+    case TaskState::ABORTED:
+        return "aborted";
+    case TaskState::INTERRUPTED:
+        return "interrupted";
+    case TaskState::FAILED:
+        return "failed";
+    }
+    return "unknown";
+}
+
+// report transitions once, using the same boot clock as the native dwell
+void ModeFeatherLane::set_task_state(TaskState state, const char *reason)
+{
+    if (_task_state == state) {
+        return;
+    }
+    _task_state = state;
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "FL L11 t=%u s=%s r=%s ms=%lu",
+                  unsigned(_task_id), task_state_name(), reason, (unsigned long)AP_HAL::millis());
+}
 
 bool ModeFeatherLane::reject_start(const char *reason)
 {
@@ -35,6 +72,41 @@ bool ModeFeatherLane::start_task(uint16_t task_id)
         return reject_start("mode_change");
     }
     return started;
+}
+
+// successful stock BRAKE entry calls exit(); only that path records operator abort
+bool ModeFeatherLane::abort_task(uint16_t task_id)
+{
+    _abort_failure = nullptr;
+    if (task_id != _task_id) {
+        _abort_failure = "task";
+        return false;
+    }
+    if (_task_state == TaskState::ABORTED) {
+        return true;
+    }
+    if (!_executing || copter.flightmode != this ||
+        (_task_state != TaskState::RUNNING && _task_state != TaskState::DWELLING)) {
+        _abort_failure = "not_running";
+        return false;
+    }
+    if (!navigation_valid() || !reference_valid()) {
+        _abort_failure = "navigation";
+        return false;
+    }
+
+#if MODE_BRAKE_ENABLED
+    _abort_requested = true;
+    const bool changed_mode = copter.set_mode(Number::BRAKE, ModeReason::GCS_COMMAND);
+    _abort_requested = false;
+    if (changed_mode) {
+        return true;
+    }
+    _abort_failure = "brake_entry";
+#else
+    _abort_failure = "brake_disabled";
+#endif
+    return false;
 }
 
 bool ModeFeatherLane::navigation_valid() const
@@ -122,6 +194,10 @@ bool ModeFeatherLane::init(bool ignore_checks)
     _height_reset_ms = ahrs.getLastPosDownReset(height_reset_m);
     _executing = true;
     _consumed = true;
+    _destination = destination;
+    _arrival_radius_m = task->radius_m;
+    _last_arrival_check_ms = AP_HAL::millis();
+    set_task_state(TaskState::RUNNING, "start");
 
     GCS_SEND_TEXT(MAV_SEVERITY_INFO, "FL L10 goal=%ld,%ld alt_cm=%ld",
                   (long)destination.lat, (long)destination.lng, (long)destination.alt);
@@ -150,10 +226,68 @@ bool ModeFeatherLane::reference_valid()
            ahrs.getLastPosDownReset(height_reset_m) == _height_reset_ms;
 }
 
+// all bounds must remain satisfied across a continuous series of native updates
+bool ModeFeatherLane::update_arrival()
+{
+    if (_task_state == TaskState::COMPLETE) {
+        return true;
+    }
+
+    Location current_location;
+    Vector3f velocity_ned_ms;
+    if (!ahrs.get_location(current_location) ||
+        !current_location.change_alt_frame(Location::AltFrame::ABSOLUTE) ||
+        !ahrs.get_velocity_NED(velocity_ned_ms) ||
+        !isfinite(velocity_ned_ms.x) || !isfinite(velocity_ned_ms.y) || !isfinite(velocity_ned_ms.z)) {
+        return false;
+    }
+
+    const uint32_t now_ms = AP_HAL::millis();
+    const bool update_gap = now_ms - _last_arrival_check_ms > MAX_ARRIVAL_UPDATE_GAP_MS;
+    _last_arrival_check_ms = now_ms;
+    const bool within_bounds = current_location.get_distance(_destination) <= _arrival_radius_m &&
+        velocity_ned_ms.xy().length() <= MAX_ARRIVAL_SPEED_MPS &&
+        fabsf(float(current_location.alt) - float(_destination.alt)) * CM_TO_METRES <= MAX_ARRIVAL_HEIGHT_ERROR_M &&
+        fabsf(velocity_ned_ms.z) <= MAX_ARRIVAL_VERTICAL_SPEED_MPS;
+
+    if (update_gap || !within_bounds) {
+        set_task_state(TaskState::RUNNING, update_gap ? "gap" : "bounds");
+        return true;
+    }
+    if (_task_state != TaskState::DWELLING) {
+        _dwell_start_ms = now_ms;
+        set_task_state(TaskState::DWELLING, "bounds");
+    }
+    if (now_ms - _dwell_start_ms >= ARRIVAL_DWELL_MS) {
+        set_task_state(TaskState::COMPLETE, "dwell");
+    }
+    return true;
+}
+
 void ModeFeatherLane::run()
 {
-    if (!navigation_valid() || !reference_valid()) {
-        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "FL L10 guard reference/navigation");
+    // latch a failed execution's fallback even if an estimator flag later recovers
+    if (_fallback_requested) {
+        copter.set_mode_land_with_pause(ModeReason::FAILSAFE);
+        return;
+    }
+
+    const char *failure = nullptr;
+    if (!navigation_valid()) {
+        failure = "navigation";
+    } else if (!reference_valid()) {
+        failure = "reference";
+    } else if (!update_arrival()) {
+        failure = "measurement";
+    }
+    if (failure != nullptr) {
+        _fallback_requested = true;
+        if (_task_state == TaskState::COMPLETE) {
+            // keep the completed task result; subsequent flight safety still has authority
+            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "FL L11 guard r=%s", failure);
+        } else {
+            set_task_state(TaskState::FAILED, failure);
+        }
         copter.set_mode_land_with_pause(ModeReason::FAILSAFE);
         return;
     }
@@ -165,6 +299,10 @@ void ModeFeatherLane::run()
 void ModeFeatherLane::exit()
 {
     _executing = false;
+    if (_task_state == TaskState::RUNNING || _task_state == TaskState::DWELLING) {
+        set_task_state(_abort_requested ? TaskState::ABORTED : TaskState::INTERRUPTED,
+                       _abort_requested ? "operator" : "mode_exit");
+    }
     GCS_SEND_TEXT(MAV_SEVERITY_INFO, "FL L10 exit task=%u", unsigned(_task_id));
 }
 

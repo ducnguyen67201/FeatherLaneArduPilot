@@ -1247,6 +1247,9 @@ public:
 
     bool start_task(uint16_t task_id);
     const char *start_failure() const { return _start_failure != nullptr ? _start_failure : "none"; }
+    bool abort_task(uint16_t task_id);
+    const char *abort_failure() const { return _abort_failure != nullptr ? _abort_failure : "none"; }
+    const char *task_state_name() const;
 
     bool init(bool ignore_checks) override;
     void run() override;
@@ -1270,15 +1273,35 @@ protected:
     const char *name4() const override { return "FLNE"; }
 
 private:
+    enum class TaskState : uint8_t {
+        IDLE,
+        RUNNING,
+        DWELLING,
+        COMPLETE,
+        ABORTED,
+        INTERRUPTED,
+        FAILED,
+    };
+
     bool reject_start(const char *reason);
     bool navigation_valid() const;
     bool reference_valid();
+    bool update_arrival();
+    void set_task_state(TaskState state, const char *reason);
 
     bool _entry_requested = false;
     bool _executing = false;
     bool _consumed = false;
+    bool _abort_requested = false;
+    bool _fallback_requested = false;
     uint16_t _task_id = 0;
     const char *_start_failure = nullptr;
+    const char *_abort_failure = nullptr;
+    TaskState _task_state = TaskState::IDLE;
+    Location _destination;
+    float _arrival_radius_m = 0;
+    uint32_t _dwell_start_ms = 0;
+    uint32_t _last_arrival_check_ms = 0;
     Location _entry_home;
     Location _entry_origin;
     uint32_t _position_reset_ms = 0;

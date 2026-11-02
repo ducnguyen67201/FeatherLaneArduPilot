@@ -40,7 +40,7 @@ protected:
     MAV_RESULT handle_featherlane_admission(const mavlink_command_int_t &packet, const mavlink_message_t &msg);
 #endif
 #if MODE_FEATHERLANE_ENABLED
-    MAV_RESULT handle_featherlane_start(const mavlink_command_int_t &packet, const mavlink_message_t &msg);
+    MAV_RESULT handle_featherlane_task_command(const mavlink_command_int_t &packet, const mavlink_message_t &msg);
 #endif
     MAV_RESULT handle_command_pause_continue(const mavlink_command_int_t &packet);
 
