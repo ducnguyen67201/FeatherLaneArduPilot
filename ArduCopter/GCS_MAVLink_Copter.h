@@ -3,6 +3,7 @@
 #include <GCS_MAVLink/GCS.h>
 #include <AP_Winch/AP_Winch_config.h>
 #include "defines.h"
+#include "config.h"
 
 #ifndef AC_MAVLINK_SOLO_BUTTON_COMMAND_HANDLING_ENABLED
 #define AC_MAVLINK_SOLO_BUTTON_COMMAND_HANDLING_ENABLED 1
@@ -37,6 +38,9 @@ protected:
     MAV_RESULT handle_command_int_do_reposition(const mavlink_command_int_t &packet);
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
     MAV_RESULT handle_featherlane_admission(const mavlink_command_int_t &packet, const mavlink_message_t &msg);
+#endif
+#if MODE_FEATHERLANE_ENABLED
+    MAV_RESULT handle_featherlane_start(const mavlink_command_int_t &packet, const mavlink_message_t &msg);
 #endif
     MAV_RESULT handle_command_pause_continue(const mavlink_command_int_t &packet);
 

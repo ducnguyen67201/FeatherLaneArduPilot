@@ -218,6 +218,7 @@ public:
     friend class ModeFlip;
     friend class ModeFlowHold;
     friend class ModeFollow;
+    friend class ModeFeatherLane;
     friend class ModeGuided;
     friend class ModeLand;
     friend class ModeLoiter;
@@ -1062,6 +1063,9 @@ private:
 #endif
 #if MODE_GUIDED_ENABLED
     ModeGuided mode_guided;
+#if MODE_FEATHERLANE_ENABLED
+    ModeFeatherLane mode_featherlane;
+#endif
 #if AP_SCRIPTING_ENABLED
     // Custom modes registered at runtime
     ModeGuidedCustom *mode_guided_custom[5];

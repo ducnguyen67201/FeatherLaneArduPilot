@@ -101,6 +101,7 @@ public:
         AUTOROTATE =   26,  // Autonomous autorotation
         AUTO_RTL =     27,  // Auto RTL, this is not a true mode, AUTO will report as this mode if entered to perform a DO_LAND_START Landing sequence
         TURTLE =       28,  // Flip over after crash
+        FEATHERLANE =  31,  // project-local known-goal mode, enabled only in multicopter SITL
 
         // Mode number 30 reserved for "offboard" for external/lua control.
 
@@ -1237,6 +1238,53 @@ private:
     // guided mode is paused or not
     bool _paused;
 };
+
+#if MODE_FEATHERLANE_ENABLED
+class ModeFeatherLane : public ModeGuided {
+public:
+    using ModeGuided::Mode;
+    Number mode_number() const override { return Number::FEATHERLANE; }
+
+    bool start_task(uint16_t task_id);
+    const char *start_failure() const { return _start_failure != nullptr ? _start_failure : "none"; }
+
+    bool init(bool ignore_checks) override;
+    void run() override;
+    void exit() override;
+
+    // flight preparation uses the stock path; this mode consumes an airborne task
+    bool allows_arming(AP_Arming::Method method) const override { return false; }
+    bool has_user_takeoff(bool must_navigate) const override { return false; }
+    bool allows_GCS_or_SCR_arming_with_throttle_high() const override { return false; }
+
+    // do not route stock Guided setpoints into the native owner's controller state
+    bool in_guided_mode() const override { return false; }
+
+    // a task's limits are fixed for this execution; operator takeover uses a mode change
+    bool set_speed_NE_ms(float speed_ne_ms) override { return false; }
+    bool set_speed_up_ms(float speed_up_ms) override { return false; }
+    bool set_speed_down_ms(float speed_down_ms) override { return false; }
+
+protected:
+    const char *name() const override { return "FeatherLane"; }
+    const char *name4() const override { return "FLNE"; }
+
+private:
+    bool reject_start(const char *reason);
+    bool navigation_valid() const;
+    bool reference_valid();
+
+    bool _entry_requested = false;
+    bool _executing = false;
+    bool _consumed = false;
+    uint16_t _task_id = 0;
+    const char *_start_failure = nullptr;
+    Location _entry_home;
+    Location _entry_origin;
+    uint32_t _position_reset_ms = 0;
+    uint32_t _height_reset_ms = 0;
+};
+#endif // MODE_FEATHERLANE_ENABLED
 
 #if AP_SCRIPTING_ENABLED
 // Mode which behaves as guided with custom mode number and name

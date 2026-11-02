@@ -64,6 +64,11 @@ Mode *Copter::mode_from_mode_num(const Mode::Number mode)
             return &mode_guided;
 #endif
 
+#if MODE_FEATHERLANE_ENABLED
+        case Mode::Number::FEATHERLANE:
+            return &mode_featherlane;
+#endif
+
         case Mode::Number::LAND:
             return &mode_land;
 
@@ -234,6 +239,9 @@ uint32_t Copter::get_available_mode_enabled_mask() const
 #endif
 #if MODE_GUIDED_ENABLED
         &copter.mode_guided,
+#endif
+#if MODE_FEATHERLANE_ENABLED
+        &copter.mode_featherlane,
 #endif
         &copter.mode_land,
 #if MODE_RTL_ENABLED

@@ -178,6 +178,11 @@
 # define MODE_GUIDED_ENABLED 1
 #endif
 
+// FeatherLane known-goal adapter is qualified only for native multicopter SITL
+#ifndef MODE_FEATHERLANE_ENABLED
+# define MODE_FEATHERLANE_ENABLED (MODE_GUIDED_ENABLED && CONFIG_HAL_BOARD == HAL_BOARD_SITL && FRAME_CONFIG == MULTICOPTER_FRAME)
+#endif
+
 //////////////////////////////////////////////////////////////////////////////
 // GuidedNoGPS mode - control vehicle's angles from GCS
 #ifndef MODE_GUIDED_NOGPS_ENABLED

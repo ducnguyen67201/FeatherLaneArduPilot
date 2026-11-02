@@ -557,9 +557,58 @@ MAV_RESULT GCS_MAVLINK_Copter::handle_featherlane_admission(const mavlink_comman
 }
 #endif // CONFIG_HAL_BOARD == HAL_BOARD_SITL
 
+#if MODE_FEATHERLANE_ENABLED
+MAV_RESULT GCS_MAVLINK_Copter::handle_featherlane_start(const mavlink_command_int_t &packet,
+                                                    const mavlink_message_t &msg)
+{
+    static constexpr float START_VERSION = 1.0f;
+
+    if (msg.msgid != MAVLINK_MSG_ID_COMMAND_INT) {
+        return MAV_RESULT_COMMAND_INT_ONLY;
+    }
+
+    if (!gcs().sysid_is_gcs(msg.sysid)) {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "FL L10 denied source");
+        return MAV_RESULT_DENIED;
+    }
+
+    // execution identifies a stored task; it does not accept another destination
+    if (packet.frame != MAV_FRAME_MISSION || packet.current != 0 || packet.autocontinue != 0 ||
+        !is_zero(packet.param3) || !is_zero(packet.param4) ||
+        packet.x != 0 || packet.y != 0 || !is_zero(packet.z)) {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "FL L10 denied fields");
+        return MAV_RESULT_UNSUPPORTED;
+    }
+
+    if (!isfinite(packet.param1) || packet.param1 < START_VERSION || packet.param1 > START_VERSION) {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "FL L10 denied version");
+        return MAV_RESULT_UNSUPPORTED;
+    }
+
+    const auto *task = copter.featherlane_task.task();
+    if (task == nullptr || !isfinite(packet.param2) || packet.param2 < task->id || packet.param2 > task->id) {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "FL L10 denied task");
+        return MAV_RESULT_DENIED;
+    }
+
+    if (!copter.mode_featherlane.start_task(task->id)) {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "FL L10 denied %s", copter.mode_featherlane.start_failure());
+        return MAV_RESULT_DENIED;
+    }
+
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "FL L10 running task=%u", unsigned(task->id));
+    return MAV_RESULT_ACCEPTED;
+}
+#endif // MODE_FEATHERLANE_ENABLED
+
 MAV_RESULT GCS_MAVLINK_Copter::handle_command_int_packet(const mavlink_command_int_t &packet, const mavlink_message_t &msg)
 {
     switch(packet.command) {
+
+#if MODE_FEATHERLANE_ENABLED
+    case MAV_CMD_USER_2:
+        return handle_featherlane_start(packet, msg);
+#endif
 
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
     case MAV_CMD_USER_1:
