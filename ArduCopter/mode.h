@@ -1278,28 +1278,44 @@ private:
         RUNNING,
         DWELLING,
         COMPLETE,
+        BLOCKED,
         ABORTED,
         INTERRUPTED,
         FAILED,
+    };
+
+    enum class AvoidanceResult : uint8_t {
+        CLEAR,
+        BLOCKED,
+        INVALID,
     };
 
     bool reject_start(const char *reason);
     bool navigation_valid() const;
     bool reference_valid();
     bool update_arrival();
+    AvoidanceResult check_avoidance();
+    void stop_task(TaskState state, const char *reason);
+    void fail_task(const char *reason);
     void set_task_state(TaskState state, const char *reason);
 
     bool _entry_requested = false;
     bool _executing = false;
     bool _consumed = false;
     bool _abort_requested = false;
+    bool _stop_requested = false;
     bool _fallback_requested = false;
     uint16_t _task_id = 0;
     const char *_start_failure = nullptr;
     const char *_abort_failure = nullptr;
+    const char *_avoidance_failure = nullptr;
+    const char *_stop_reason = nullptr;
     TaskState _task_state = TaskState::IDLE;
+    TaskState _stop_state = TaskState::FAILED;
     Location _destination;
     float _arrival_radius_m = 0;
+    float _speed_limit_mps = 0;
+    uint32_t _execution_start_ms = 0;
     uint32_t _dwell_start_ms = 0;
     uint32_t _last_arrival_check_ms = 0;
     Location _entry_home;

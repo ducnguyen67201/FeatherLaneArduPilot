@@ -3,6 +3,10 @@
 
 #if MODE_FEATHERLANE_ENABLED
 
+#if AP_RANGEFINDER_ENABLED
+#include <AP_RangeFinder/AP_RangeFinder_Backend.h>
+#endif
+
 static constexpr float MAX_REFERENCE_SHIFT_M = 0.5f;
 static constexpr float MAX_ENTRY_SPEED_MPS = 0.3f;
 static constexpr float MAX_ENTRY_HEIGHT_ERROR_M = 0.5f;
@@ -13,6 +17,21 @@ static constexpr float MAX_ARRIVAL_HEIGHT_ERROR_M = 0.2f;
 static constexpr float MAX_ARRIVAL_VERTICAL_SPEED_MPS = 0.2f;
 static constexpr uint32_t ARRIVAL_DWELL_MS = 2000;
 static constexpr uint32_t MAX_ARRIVAL_UPDATE_GAP_MS = 250;
+static constexpr float MAX_AVOIDANCE_SPEED_MPS = 0.5f;
+static constexpr float MAX_AVOIDANCE_RADIUS_M = 0.5f;
+static constexpr float MAX_AVOIDANCE_DISTANCE_M = 6.0f;
+static constexpr uint32_t MAX_TASK_EXECUTION_MS = 30000;
+
+#if AP_AVOIDANCE_ENABLED && HAL_PROXIMITY_ENABLED && AP_RANGEFINDER_ENABLED && \
+    AP_PROXIMITY_RANGEFINDER_ENABLED && AP_RANGEFINDER_MAVLINK_ENABLED
+static constexpr float FRONT_RANGE_MIN_M = 0.2f;
+static constexpr float FRONT_RANGE_MAX_M = 8.0f;
+static constexpr float MAX_FRONT_PATH_ANGLE_DEG = 3.0f;
+static constexpr float MAX_SENSOR_TILT_DEG = 5.0f;
+static constexpr float MIN_GOAL_DIRECTION_DISTANCE_M = 0.1f;
+static constexpr float MIN_AVOIDANCE_CHANGE_MPS = 0.01f;
+static constexpr uint32_t MAX_OBSERVATION_AGE_MS = 350;
+#endif
 
 const char *ModeFeatherLane::task_state_name() const
 {
@@ -25,6 +44,8 @@ const char *ModeFeatherLane::task_state_name() const
         return "dwelling";
     case TaskState::COMPLETE:
         return "complete";
+    case TaskState::BLOCKED:
+        return "blocked";
     case TaskState::ABORTED:
         return "aborted";
     case TaskState::INTERRUPTED:
@@ -167,6 +188,23 @@ bool ModeFeatherLane::init(bool ignore_checks)
         return reject_start("entry_distance");
     }
 
+    // this slice qualifies one slow, forward corridor and a small arrival region
+    if (task->speed_mps > MAX_AVOIDANCE_SPEED_MPS || task->radius_m > MAX_AVOIDANCE_RADIUS_M ||
+        destination.get_distance(current_location) > MAX_AVOIDANCE_DISTANCE_M) {
+        return reject_start("avoidance_limits");
+    }
+
+    _destination = destination;
+    _speed_limit_mps = task->speed_mps;
+    const AvoidanceResult avoidance = check_avoidance();
+    if (avoidance != AvoidanceResult::CLEAR) {
+        return reject_start(avoidance == AvoidanceResult::BLOCKED ? "obstacle" : _avoidance_failure);
+    }
+
+#if !MODE_BRAKE_ENABLED
+    return reject_start("brake_disabled");
+#endif
+
     Vector3p destination_ned_m;
     bool terrain_alt;
     if (!wp_nav->get_vector_NED_m(destination, destination_ned_m, terrain_alt) || terrain_alt) {
@@ -197,6 +235,7 @@ bool ModeFeatherLane::init(bool ignore_checks)
     _destination = destination;
     _arrival_radius_m = task->radius_m;
     _last_arrival_check_ms = AP_HAL::millis();
+    _execution_start_ms = _last_arrival_check_ms;
     set_task_state(TaskState::RUNNING, "start");
 
     GCS_SEND_TEXT(MAV_SEVERITY_INFO, "FL L10 goal=%ld,%ld alt_cm=%ld",
@@ -264,6 +303,110 @@ bool ModeFeatherLane::update_arrival()
     return true;
 }
 
+// use the qualified stock limiter as a veto; it does not replace goal tracking
+ModeFeatherLane::AvoidanceResult ModeFeatherLane::check_avoidance()
+{
+    _avoidance_failure = "avoidance_disabled";
+#if AP_AVOIDANCE_ENABLED && HAL_PROXIMITY_ENABLED && AP_RANGEFINDER_ENABLED && \
+    AP_PROXIMITY_RANGEFINDER_ENABLED && AP_RANGEFINDER_MAVLINK_ENABLED
+    const AP_Proximity *proximity = AP::proximity();
+    const auto *sensor = copter.rangefinder.get_backend(0);
+    _avoidance_failure = "sensor_profile";
+    if (sensor == nullptr || copter.rangefinder.num_sensors() != 1 ||
+        sensor->allocated_type() != RangeFinder::Type::MAVLink ||
+        sensor->type() != RangeFinder::Type::MAVLink || sensor->orientation() != ROTATION_NONE ||
+        !is_equal(sensor->min_distance(), FRONT_RANGE_MIN_M) ||
+        !is_equal(sensor->max_distance(), FRONT_RANGE_MAX_M) ||
+        proximity == nullptr || proximity->num_sensors() != 1 ||
+        proximity->get_type(0) != AP_Proximity::Type::RangeFinder ||
+        !copter.avoid.proximity_avoidance_enabled() || !is_zero(copter.avoid.get_min_alt())) {
+        return AvoidanceResult::INVALID;
+    }
+
+    // age the actual backend receive time, not the simulator's wire timestamp
+    _avoidance_failure = "observation";
+    const uint32_t last_reading_ms = sensor->last_reading_ms();
+    const uint32_t age_ms = AP_HAL::millis() - last_reading_ms;
+    if (last_reading_ms == 0 || age_ms > MAX_OBSERVATION_AGE_MS ||
+        proximity->get_instance_status(0) != AP_Proximity::Status::Good ||
+        (sensor->status() != RangeFinder::Status::Good &&
+         sensor->status() != RangeFinder::Status::OutOfRangeHigh) || !isfinite(sensor->distance())) {
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "FL L15 observation age_ms=%lu", (unsigned long)age_ms);
+        return AvoidanceResult::INVALID;
+    }
+
+    // no-return remains unknown; only this prequalified narrow corridor is supported
+    _avoidance_failure = "coverage";
+    if (!isfinite(ahrs.get_roll_rad()) || !isfinite(ahrs.get_pitch_rad()) || !isfinite(ahrs.get_yaw_rad()) ||
+        fabsf(ahrs.get_roll_rad()) > radians(MAX_SENSOR_TILT_DEG) ||
+        fabsf(ahrs.get_pitch_rad()) > radians(MAX_SENSOR_TILT_DEG)) {
+        return AvoidanceResult::INVALID;
+    }
+
+    Location current_location;
+    _avoidance_failure = "measurement";
+    if (!ahrs.get_location(current_location)) {
+        return AvoidanceResult::INVALID;
+    }
+    const Vector2f goal_offset_ne_m = current_location.get_distance_NE(_destination);
+    const float distance_m = goal_offset_ne_m.length();
+    if (!isfinite(distance_m)) {
+        return AvoidanceResult::INVALID;
+    }
+    if (distance_m <= MIN_GOAL_DIRECTION_DISTANCE_M) {
+        return AvoidanceResult::CLEAR;
+    }
+
+    _avoidance_failure = "coverage";
+    const Vector2f goal_offset_body_m = ahrs.earth_to_body2D(goal_offset_ne_m);
+    if (fabsf(atan2f(goal_offset_body_m.y, goal_offset_body_m.x)) > radians(MAX_FRONT_PATH_ANGLE_DEG)) {
+        return AvoidanceResult::INVALID;
+    }
+
+    const Vector3f requested_velocity_ned_ms{goal_offset_ne_m.x * _speed_limit_mps / distance_m,
+                                           goal_offset_ne_m.y * _speed_limit_mps / distance_m, 0.0f};
+    Vector3f limited_velocity_ned_ms = requested_velocity_ned_ms;
+    copter.avoid.adjust_velocity_NED_m(limited_velocity_ned_ms,
+                                     pos_control->NE_get_pos_p().kP(), pos_control->NE_get_max_accel_mss(),
+                                     pos_control->D_get_pos_p().kP(), pos_control->D_get_max_accel_mss(), G_Dt);
+    _avoidance_failure = nullptr;
+    return (limited_velocity_ned_ms - requested_velocity_ned_ms).length() > MIN_AVOIDANCE_CHANGE_MPS ?
+        AvoidanceResult::BLOCKED : AvoidanceResult::CLEAR;
+#else
+    return AvoidanceResult::INVALID;
+#endif
+}
+
+// only successful stock mode entry records the requested blocked/failed result
+void ModeFeatherLane::stop_task(TaskState state, const char *reason)
+{
+#if MODE_BRAKE_ENABLED
+    _stop_state = state;
+    _stop_reason = reason;
+    _stop_requested = true;
+    const bool changed_mode = copter.set_mode(Number::BRAKE, ModeReason::FAILSAFE);
+    _stop_requested = false;
+    if (changed_mode) {
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "FL L15 handoff r=%s ms=%lu",
+                      reason, (unsigned long)AP_HAL::millis());
+        return;
+    }
+#endif
+    fail_task("brake_entry");
+}
+
+void ModeFeatherLane::fail_task(const char *reason)
+{
+    _fallback_requested = true;
+    if (_task_state == TaskState::COMPLETE) {
+        // completed task state and subsequent flight safety remain separate
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "FL L11 guard r=%s", reason);
+    } else {
+        set_task_state(TaskState::FAILED, reason);
+    }
+    copter.set_mode_land_with_pause(ModeReason::FAILSAFE);
+}
+
 void ModeFeatherLane::run()
 {
     // latch a failed execution's fallback even if an estimator flag later recovers
@@ -272,23 +415,31 @@ void ModeFeatherLane::run()
         return;
     }
 
-    const char *failure = nullptr;
     if (!navigation_valid()) {
-        failure = "navigation";
-    } else if (!reference_valid()) {
-        failure = "reference";
-    } else if (!update_arrival()) {
-        failure = "measurement";
+        fail_task("navigation");
+        return;
     }
-    if (failure != nullptr) {
-        _fallback_requested = true;
-        if (_task_state == TaskState::COMPLETE) {
-            // keep the completed task result; subsequent flight safety still has authority
-            GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "FL L11 guard r=%s", failure);
-        } else {
-            set_task_state(TaskState::FAILED, failure);
-        }
-        copter.set_mode_land_with_pause(ModeReason::FAILSAFE);
+    if (!reference_valid()) {
+        fail_task("reference");
+        return;
+    }
+
+    const AvoidanceResult avoidance = check_avoidance();
+    if (avoidance == AvoidanceResult::INVALID) {
+        stop_task(TaskState::FAILED, _avoidance_failure);
+        return;
+    }
+    if (avoidance == AvoidanceResult::BLOCKED) {
+        stop_task(TaskState::BLOCKED, "obstacle");
+        return;
+    }
+    if (_task_state != TaskState::COMPLETE &&
+        AP_HAL::millis() - _execution_start_ms >= MAX_TASK_EXECUTION_MS) {
+        stop_task(TaskState::FAILED, "timeout");
+        return;
+    }
+    if (!update_arrival()) {
+        fail_task("measurement");
         return;
     }
 
@@ -300,8 +451,12 @@ void ModeFeatherLane::exit()
 {
     _executing = false;
     if (_task_state == TaskState::RUNNING || _task_state == TaskState::DWELLING) {
-        set_task_state(_abort_requested ? TaskState::ABORTED : TaskState::INTERRUPTED,
-                       _abort_requested ? "operator" : "mode_exit");
+        if (_stop_requested) {
+            set_task_state(_stop_state, _stop_reason);
+        } else {
+            set_task_state(_abort_requested ? TaskState::ABORTED : TaskState::INTERRUPTED,
+                           _abort_requested ? "operator" : "mode_exit");
+        }
     }
     GCS_SEND_TEXT(MAV_SEVERITY_INFO, "FL L10 exit task=%u", unsigned(_task_id));
 }
